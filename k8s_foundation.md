@@ -176,6 +176,36 @@ sequenceDiagram
     end
 ```
 
+### Prerequisite
+
+```bash
+# --- kubectl + kubelogin (installed together by the Azure CLI) ---
+sudo az aks install-cli
+kubectl version --client
+kubelogin --version
+```
+
+```bash
+# --- Helm 3 ---
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version
+```
+
+```bash
+# --- k9s
+K9S_VERSION="$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep -oP '"tag_name": "\K[^"]+')"
+curl -sL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" -o /tmp/k9s.tar.gz
+tar -xzf /tmp/k9s.tar.gz -C /tmp k9s
+sudo mv /tmp/k9s /usr/local/bin/k9s
+k9s version
+```
+
+```bash
+# --- alias
+echo 'alias k=kubectl' >> ~/.bashrc
+source ~/.bashrc
+```
+
 ### Setup
 
 ```bash
@@ -189,7 +219,7 @@ export NS_TEST="${STUDENT}-test"
 export RG="rg-k8s-training"
 export AKS_NAME="aks-training-shared"
 export ACR_NAME="acrtrainingshared"
-export LOCATION="centralindia"
+export LOCATION="eastus"
 ```
 ```bash
 cat <<EOF >> ~/.bashrc
