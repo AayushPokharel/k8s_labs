@@ -6,7 +6,6 @@
 ### Objectives
 - Describe the control plane / data plane split and say which half Microsoft operates on AKS.
 - Map five VM-era concepts onto Kubernetes objects and explain declarative reconciliation.
-- Apply a scoring rubric to decide whether a workload belongs on AKS — and name five that do not.
 - Size a cluster and design its node pools from workload requests.
 
 ### Concept
