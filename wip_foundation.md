@@ -1,11 +1,15 @@
-# SECTION 9 — Kubernetes and AKS Foundations
+# SECTION 9 — Kubernetes and AKS Foundations (6h)
+
+**Deliverable:** an AKS cluster provisioned by Terraform, running the previously containerized monolith as a Deployment + Service, with dev/test namespace isolation and a Helm-installed component.
+
 ---
 
-## Lab 9.1 — Architecture, modernization strategy & sizing
+## Lab 9.1 — Architecture, modernization strategy & sizing (45 min, no terminal)
 
 ### Objectives
 - Describe the control plane / data plane split and say which half Microsoft operates on AKS.
 - Map five VM-era concepts onto Kubernetes objects and explain declarative reconciliation.
+- Apply a scoring rubric to decide whether a workload belongs on AKS — and name five that do not.
 - Size a cluster and design its node pools from workload requests.
 
 ### Concept
@@ -176,36 +180,6 @@ sequenceDiagram
     end
 ```
 
-### Prerequisite
-
-```bash
-# --- kubectl + kubelogin (installed together by the Azure CLI) ---
-sudo az aks install-cli
-kubectl version --client
-kubelogin --version
-```
-
-```bash
-# --- Helm 3 ---
-curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-helm version
-```
-
-```bash
-# --- k9s
-K9S_VERSION="$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep -oP '"tag_name": "\K[^"]+')"
-curl -sL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz" -o /tmp/k9s.tar.gz
-tar -xzf /tmp/k9s.tar.gz -C /tmp k9s
-sudo mv /tmp/k9s /usr/local/bin/k9s
-k9s version
-```
-
-```bash
-# --- alias
-echo 'alias k=kubectl' >> ~/.bashrc
-source ~/.bashrc
-```
-
 ### Setup
 
 ```bash
@@ -219,7 +193,7 @@ export NS_TEST="${STUDENT}-test"
 export RG="rg-k8s-training"
 export AKS_NAME="aks-training-shared"
 export ACR_NAME="acrtrainingshared"
-export LOCATION="eastus"
+export LOCATION="centralindia"
 ```
 ```bash
 cat <<EOF >> ~/.bashrc
@@ -739,9 +713,11 @@ cd ~/k8s-labs/09-foundations
 ```bash
 kubectl config set-context --current --namespace="$NAMESPACE"
 ```
-
 ```bash
-export APP_IMAGE="nginx:1.27-alpine"
+export ACR_LOGIN_SERVER="$(az acr show --name "$ACR_NAME" --query loginServer -o tsv 2>/dev/null || echo "${ACR_NAME}.azurecr.io")"
+```
+```bash
+export APP_IMAGE="${ACR_LOGIN_SERVER}/${STUDENT}/monolith:1.0.0"
 ```
 ```bash
 az acr repository show-tags --name "$ACR_NAME" --repository "${STUDENT}/monolith" -o table 2>/dev/null \
@@ -814,27 +790,15 @@ kubectl rollout status deployment/web-rs -n "$NAMESPACE" 2>/dev/null || kubectl 
 ```
 
 # Self-healing: delete one, get three back.
-```bash
 VICTIM="$(kubectl get pods -n "$NAMESPACE" -l managed-by=replicaset -o jsonpath='{.items[0].metadata.name}')"
-```
-```bash
 kubectl delete pod "$VICTIM" -n "$NAMESPACE"
 sleep 15
-```
-```bash
 kubectl get pods -n "$NAMESPACE" -l managed-by=replicaset
-```
-```bash
+
 # The selector -- not the owner reference -- is what it watches.
 ADOPTEE="$(kubectl get pods -n "$NAMESPACE" -l managed-by=replicaset -o jsonpath='{.items[0].metadata.name}')"
-```
-```bash
 kubectl label pod "$ADOPTEE" -n "$NAMESPACE" managed-by=orphan --overwrite
-```
-```bash
-kubectl get pods -n "$NAMESPACE" --show-labels  # FOUR pods now
-```
-```bash
+kubectl get pods -n "$NAMESPACE" --show-labels          # FOUR pods now
 kubectl delete pod "$ADOPTEE" -n "$NAMESPACE"
 ```
 
@@ -843,16 +807,12 @@ Relabelling to orphan a Pod is exactly how you quarantine a misbehaving Pod for 
 ```bash
 # The limitation that motivates Deployments:
 kubectl set image rs/web-rs web=mcr.microsoft.com/azuredocs/aks-helloworld:v2 -n "$NAMESPACE"
-```
-```bash
 kubectl get pods -n "$NAMESPACE" -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image'
 # Every running Pod is still v1. A ReplicaSet applies its template only when CREATING a Pod.
-```
-```bash
 kubectl delete -f 03-replicaset.yaml -n "$NAMESPACE"
 ```
 
-### Part B — The monolith as a Deployment + Service + ConfigMap + Secret
+### Part B — The monolith as a Deployment + Service + ConfigMap + Secret (40 min)
 
 ```bash
 cat <<'EOF' > 04-config.yaml
@@ -886,17 +846,15 @@ stringData:
   DB_PASSWORD: "Tr41n1ng-L4b-N0t-Real!"
   API_KEY: "lab-only-8f3c1d0a4b7e9265"
 EOF
-```
-```bash
+
 kubectl apply -f 04-config.yaml -n "$NAMESPACE"
-```
-```bash
 echo "04-config.yaml" >> .gitignore
-```
-```bash
+
 # base64 is ENCODING, not encryption:
 kubectl get secret monolith-secrets -n "$NAMESPACE" -o jsonpath='{.data.DB_PASSWORD}' | base64 -d; echo
 ```
+
+Say it to the room: anyone with `get secret` in this namespace just read the database password in one command. The control is RBAC + encryption-at-rest + not committing it to Git — not the word "Secret". **Lab 12.2 replaces this with Key Vault and Workload Identity.**
 
 ```bash
 cat <<EOF > 05-monolith.yaml
@@ -1036,36 +994,24 @@ spec:
       app: monolith
       tier: application
 EOF
-```
-```bash
+
 kubectl apply -f 05-monolith.yaml -n "$NAMESPACE"
-```
-```bash
 kubectl rollout status deployment/monolith -n "$NAMESPACE" --timeout=300s
-```
-```bash
 kubectl get deploy,rs,pods,svc,endpoints,pdb -n "$NAMESPACE" -o wide
 ```
 
 Narrate four design decisions while it rolls:
 
-- **`startupProbe` 30×5s** gives a slow JVM/.NET monolith 150 seconds to boot while liveness stays aggressive afterwards. Without it you'd need `livenessProbe.initialDelaySeconds: 150`, which also delays detection of a real hang by 150 s.
+- **`startupProbe` 30×5s** gives a slow JVM/.NET monolith 150 s to boot while liveness stays aggressive afterwards. Without it you'd need `livenessProbe.initialDelaySeconds: 150`, which also delays detection of a real hang by 150 s.
 - **`preStop: sleep 5` + `terminationGracePeriodSeconds: 45`** — endpoint removal and `SIGTERM` happen concurrently, so a short pause closes the race where a Pod receives requests after it starts shutting down.
 - **`maxSurge: 1` / `maxUnavailable: 0`** — capacity never dips below 100%.
-- **`minAvailable: 1` PDB on 2 replicas** gives `ALLOWED DISRUPTIONS: 1`. 
-- **The trap:** `minAvailable: 1` on a *single*-replica Deployment gives `0` and blocks node drains — and therefore AKS upgrades — forever, with no obvious error.
+- **`minAvailable: 1` PDB on 2 replicas** gives `ALLOWED DISRUPTIONS: 1`. **The trap:** `minAvailable: 1` on a *single*-replica Deployment gives `0` and blocks node drains — and therefore AKS upgrades — forever, with no obvious error.
 
 ```bash
 # Verify config actually reached the container
 POD="$(kubectl get pods -n "$NAMESPACE" -l app=monolith -o jsonpath='{.items[0].metadata.name}')"
-```
-```bash
 kubectl exec -it "$POD" -n "$NAMESPACE" -- sh -c 'env | grep -E "^(APP_ENV|LOG_LEVEL|DB_HOST|DB_USER|POD_NAME|NODE_NAME)=" | sort'
-```
-```bash
 kubectl exec -it "$POD" -n "$NAMESPACE" -- ls -la /etc/monolith/
-```
-```bash
 kubectl exec -it "$POD" -n "$NAMESPACE" -- cat /etc/monolith/app.properties
 ```
 
@@ -1075,20 +1021,10 @@ The `..data` symlink pointing at a timestamped directory is how the kubelet upda
 # Env vars are frozen at container start.
 kubectl patch configmap monolith-config -n "$NAMESPACE" --type=merge -p '{"data":{"LOG_LEVEL":"warn"}}'
 sleep 10
-```
-```bash
 kubectl exec -it "$POD" -n "$NAMESPACE" -- sh -c 'echo "still: LOG_LEVEL=$LOG_LEVEL"'
-```
-```bash
 kubectl rollout restart deployment/monolith -n "$NAMESPACE"
-```
-```bash
 kubectl rollout status deployment/monolith -n "$NAMESPACE" --timeout=300s
-```
-```bash
 NEW_POD="$(kubectl get pods -n "$NAMESPACE" -l app=monolith -o jsonpath='{.items[0].metadata.name}')"
-```
-```bash
 kubectl exec -it "$NEW_POD" -n "$NAMESPACE" -- sh -c 'echo "now: LOG_LEVEL=$LOG_LEVEL"'
 ```
 
@@ -1097,29 +1033,14 @@ kubectl exec -it "$NEW_POD" -n "$NAMESPACE" -- sh -c 'echo "now: LOG_LEVEL=$LOG_
 ```bash
 # Same image, second environment, different config -- the point of the whole exercise.
 kubectl apply -f 04-config.yaml   -n "$NS_DEV"
-```
-```bash
 kubectl apply -f 05-monolith.yaml -n "$NS_DEV"
-```
-```bash
 kubectl patch configmap monolith-config -n "$NS_DEV" --type=merge -p '{"data":{"APP_ENV":"dev","LOG_LEVEL":"trace"}}'
-```
-```bash
 kubectl rollout restart deployment/monolith -n "$NS_DEV"
-```
-```bash
 kubectl rollout status deployment/monolith -n "$NS_DEV" --timeout=300s
-```
-```bash
+
 kubectl get deploy monolith -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
-```
-```bash
 kubectl get deploy monolith -n "$NS_DEV"    -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
-```
-```bash
 kubectl get cm monolith-config -n "$NAMESPACE" -o jsonpath='{.data.APP_ENV}{"\n"}'
-```
-```bash
 kubectl get cm monolith-config -n "$NS_DEV"    -o jsonpath='{.data.APP_ENV}{"\n"}'
 ```
 
@@ -1127,23 +1048,11 @@ kubectl get cm monolith-config -n "$NS_DEV"    -o jsonpath='{.data.APP_ENV}{"\n"
 
 ```bash
 kubectl set image deployment/monolith monolith=mcr.microsoft.com/azuredocs/aks-helloworld:v2 -n "$NAMESPACE"
-```
-```bash
 kubectl annotate deployment/monolith -n "$NAMESPACE" kubernetes.io/change-cause="Upgrade to v2" --overwrite
-```
-```bash
 kubectl rollout status deployment/monolith -n "$NAMESPACE" --timeout=300s
-```
-```bash
-kubectl get rs -n "$NAMESPACE" -l app=monolith   # old RS kept at 0 -> instant rollback
-```
-```bash
+kubectl get rs -n "$NAMESPACE" -l app=monolith        # old RS kept at 0 -> instant rollback
 kubectl rollout history deployment/monolith -n "$NAMESPACE"
-```
-```bash
 kubectl rollout undo deployment/monolith -n "$NAMESPACE"
-```
-```bash
 kubectl rollout status deployment/monolith -n "$NAMESPACE" --timeout=300s
 ```
 
@@ -1152,25 +1061,14 @@ kubectl rollout status deployment/monolith -n "$NAMESPACE" --timeout=300s
 ```bash
 kubectl set image deployment/monolith monolith=mcr.microsoft.com/azuredocs/aks-helloworld:v99-nope -n "$NAMESPACE"
 sleep 25
-```
-```bash
 kubectl get pods -n "$NAMESPACE" -l app=monolith
-```
-```bash
 BAD="$(kubectl get pods -n "$NAMESPACE" -l app=monolith --field-selector=status.phase=Pending -o jsonpath='{.items[0].metadata.name}')"
-```
-```bash
 kubectl describe pod "$BAD" -n "$NAMESPACE" | sed -n '/Events:/,$p'
-```
-```bash
 kubectl rollout undo deployment/monolith -n "$NAMESPACE"
-```
-```bash
 kubectl rollout status deployment/monolith -n "$NAMESPACE" --timeout=300s
 ```
 
-**Availability never dropped.** 
-`maxUnavailable: 0` meant a healthy old Pod was never removed until a new one was Ready — and none ever was. A bad image became a *stalled deployment* instead of an *outage*. Real-world causes in order: wrong tag; ACR not attached (`az aks update -g $RG -n $AKS_NAME --attach-acr $ACR_NAME`); missing `imagePullSecrets`; wrong CPU architecture; registry firewall.
+**Availability never dropped.** `maxUnavailable: 0` meant a healthy old Pod was never removed until a new one was Ready — and none ever was. A bad image became a *stalled deployment* instead of an *outage*. Real-world causes in order: wrong tag; ACR not attached (`az aks update -g $RG -n $AKS_NAME --attach-acr $ACR_NAME`); missing `imagePullSecrets`; wrong CPU architecture; registry firewall.
 
 **Scenario 2 — `CrashLoopBackOff` and `--previous`.**
 
@@ -1178,18 +1076,10 @@ kubectl rollout status deployment/monolith -n "$NAMESPACE" --timeout=300s
 kubectl create deployment crasher --image=busybox:1.36 -n "$NAMESPACE" -- \
   /bin/sh -c "echo starting; sleep 5; echo 'FATAL: cannot reach db:5432' >&2; exit 1"
 sleep 45
-```
-```bash
 CP="$(kubectl get pods -n "$NAMESPACE" -l app=crasher -o jsonpath='{.items[0].metadata.name}')"
-kubectl logs "$CP" -n "$NAMESPACE"  # the current attempt -- usually not the failure
-```
-```bash
-kubectl logs "$CP" -n "$NAMESPACE" --previous  # the attempt that actually died
-```
-```bash
+kubectl logs "$CP" -n "$NAMESPACE"                 # the current attempt -- usually not the failure
+kubectl logs "$CP" -n "$NAMESPACE" --previous      # the attempt that actually died
 kubectl get pod "$CP" -n "$NAMESPACE" -o jsonpath='restarts={.status.containerStatuses[0].restartCount} exit={.status.containerStatuses[0].lastState.terminated.exitCode} reason={.status.containerStatuses[0].lastState.terminated.reason}{"\n"}'
-```
-```bash
 kubectl delete deployment crasher -n "$NAMESPACE"
 ```
 
@@ -1199,20 +1089,10 @@ kubectl delete deployment crasher -n "$NAMESPACE"
 
 ```bash
 kubectl create service clusterip web-broken --tcp=80:8080 -n "$NAMESPACE"
-```
-```bash
 kubectl patch svc web-broken -n "$NAMESPACE" --type=merge -p '{"spec":{"selector":{"app":"monolith","tier":"backend"}}}'
-```
-```bash
 kubectl get endpoints web-broken -n "$NAMESPACE"      # <none>
-```
-```bash
 kubectl get svc web-broken -n "$NAMESPACE" -o jsonpath='{.spec.selector}{"\n"}'
-```
-```bash
 kubectl get pods -n "$NAMESPACE" -l app=monolith --show-labels
-```
-```bash
 kubectl delete svc web-broken -n "$NAMESPACE"
 ```
 
@@ -1220,20 +1100,10 @@ kubectl delete svc web-broken -n "$NAMESPACE"
 
 ```bash
 kubectl get svc <svc> -n $NAMESPACE -o jsonpath='{.spec.selector}{"\n"}'   # 1. what does it select?
-```
-```bash
-kubectl get pods -n $NAMESPACE --show-labels  # 2. what do Pods have?
-```
-```bash
-kubectl get endpoints <svc> -n $NAMESPACE  # 3. did they match?
-```
-```bash
-kubectl get pods -n $NAMESPACE -o wide   # 4. are they Ready?
-```
-```bash
-kubectl exec -it <client> -n $NAMESPACE -- nslookup <svc>  # 5. does DNS resolve?
-```
-```bash
+kubectl get pods -n $NAMESPACE --show-labels                               # 2. what do Pods have?
+kubectl get endpoints <svc> -n $NAMESPACE                                  # 3. did they match?
+kubectl get pods -n $NAMESPACE -o wide                                     # 4. are they Ready?
+kubectl exec -it <client> -n $NAMESPACE -- nslookup <svc>                  # 5. does DNS resolve?
 kubectl exec -it <client> -n $NAMESPACE -- curl -v http://<svc>:<port>     # 6. does the port match?
 ```
 
@@ -1258,20 +1128,10 @@ Point at the gap in that table. The Portal is excellent for *observing* and acce
 
 ```bash
 kubectl get deploy monolith -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}/{.spec.replicas}{"\n"}'   # 2/2
-```
-```bash
-kubectl get endpoints monolith -n "$NAMESPACE"  # 2 IPs
-```
-```bash
-kubectl get pdb monolith-pdb -n "$NAMESPACE" # ALLOWED DISRUPTIONS 1
-```
-```bash
-kubectl rollout history deployment/monolith -n "$NAMESPACE" # >= 3 revisions
-```
-```bash
+kubectl get endpoints monolith -n "$NAMESPACE"                                    # 2 IPs
+kubectl get pdb monolith-pdb -n "$NAMESPACE"                                      # ALLOWED DISRUPTIONS 1
+kubectl rollout history deployment/monolith -n "$NAMESPACE"                       # >= 3 revisions
 kubectl port-forward svc/monolith 8082:80 -n "$NAMESPACE" & sleep 3
-```
-```bash
 curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8082; kill %1
 ```
 
@@ -1294,4 +1154,893 @@ kubectl delete -f 04-config.yaml   -n "$NS_DEV" --ignore-not-found
 kubectl delete pod --field-selector=status.phase=Succeeded -n "$NAMESPACE" --ignore-not-found
 kubectl get all -n "$NAMESPACE"
 ```
+
+---
+
+## Lab 9.5 — Provision AKS with Terraform (75 min)
+
+### Objectives
+- Build a complete AKS cluster in code: RG, VNet, subnet, Log Analytics, cluster, user node pool.
+- Enforce the system/user pool split with the `CriticalAddonsOnly` taint and prove it with a scheduling test.
+- Read a `terraform plan` as a change record, and destroy cleanly.
+
+### Concept
+
+Everything so far assumed a cluster existed. Three design decisions dominate an AKS module: **node pool topology** (tainted system pool + user pools), **network plugin** (Azure CNI Overlay — nodes on VNet IPs, Pods on an overlay CIDR, near-CNI performance with kubenet-like IP economy), and **identity** (system-assigned managed identity, `AcrPull` for the kubelet identity, OIDC + Workload Identity so apps need no stored secret).
+
+**Pacing note for the instructor:** start `terraform apply` at the beginning of the hour, then teach the sizing material from Lab 9.1 while the 8–10 minute provision runs.
+
+**State warning before anyone runs `apply`:** state contains secrets and is the source of truth for destruction. Local state is fine for a lab and unacceptable anywhere else.
+
+```mermaid
+flowchart LR
+    A["terraform init<br/>+ fmt + validate"] --> B["terraform plan -out=tfplan<br/>what WILL change"]
+    B --> C{"Reviewed<br/>by a human?"}
+    C -->|no| B
+    C -->|yes| D["terraform apply tfplan<br/>~8 min"]
+    D --> E["az aks get-credentials<br/>kubelogin convert-kubeconfig"]
+    E --> F["kubectl apply the monolith"]
+    F --> G["terraform destroy<br/>end of lab"]
+    subgraph POOLS["What gets built"]
+        SYS["system pool: 2x D2s_v5<br/>taint CriticalAddonsOnly"]
+        USR["user pool: 1-3x D4s_v5<br/>autoscaled, untainted"]
+    end
+    D --> POOLS
+```
+
+### Setup
+
+```bash
+mkdir -p ~/k8s-labs/09-foundations/terraform && cd $_
+export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+export TENANT_ID="$(az account show --query tenantId -o tsv)"
+
+az provider register --namespace Microsoft.ContainerService
+az provider register --namespace Microsoft.OperationalInsights
+az aks get-versions --location "$LOCATION" -o table     # pin a version that actually exists
+```
+
+### CLI walkthrough
+
+```bash
+cat <<'EOF' > providers.tf
+terraform {
+  required_version = ">= 1.6.0"
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+  }
+  # Lab uses local state. Production MUST use a remote backend:
+  # backend "azurerm" {
+  #   resource_group_name  = "rg-tfstate"
+  #   storage_account_name = "sttfstateshared01"
+  #   container_name       = "tfstate"
+  #   key                  = "aks/student-01.tfstate"
+  #   use_azuread_auth     = true
+  # }
+}
+
+provider "azurerm" {
+  subscription_id = var.subscription_id
+  features {
+    resource_group {
+      prevent_deletion_if_contains_resources = false
+    }
+  }
+}
+
+provider "random" {}
+EOF
+```
+
+```bash
+cat <<'EOF' > variables.tf
+variable "subscription_id" {
+  type = string
+}
+
+variable "tenant_id" {
+  type = string
+}
+
+variable "student_id" {
+  type = string
+  validation {
+    condition     = can(regex("^[a-z0-9-]{3,20}$", var.student_id))
+    error_message = "student_id must be 3-20 lowercase alphanumeric or hyphen characters."
+  }
+}
+
+variable "location" {
+  type    = string
+  default = "centralindia"
+}
+
+variable "kubernetes_version" {
+  type    = string
+  default = "1.31"
+}
+
+variable "sku_tier" {
+  type    = string
+  default = "Free"
+}
+
+variable "vnet_address_space" {
+  type    = list(string)
+  default = ["10.10.0.0/16"]
+}
+
+variable "aks_subnet_prefix" {
+  type    = list(string)
+  default = ["10.10.1.0/24"]
+}
+
+variable "pod_cidr" {
+  type    = string
+  default = "192.168.0.0/16"
+}
+
+variable "service_cidr" {
+  type    = string
+  default = "172.16.0.0/16"
+}
+
+variable "dns_service_ip" {
+  type    = string
+  default = "172.16.0.10"
+}
+
+variable "system_node_vm_size" {
+  type    = string
+  default = "Standard_D2s_v5"
+}
+
+variable "system_node_count" {
+  type    = number
+  default = 2
+}
+
+variable "user_node_vm_size" {
+  type    = string
+  default = "Standard_D4s_v5"
+}
+
+variable "user_node_min_count" {
+  type    = number
+  default = 1
+}
+
+variable "user_node_max_count" {
+  type    = number
+  default = 3
+}
+
+variable "max_pods_per_node" {
+  type    = number
+  default = 110
+}
+
+variable "availability_zones" {
+  type    = list(string)
+  default = ["1", "2", "3"]
+}
+
+variable "admin_group_object_ids" {
+  type    = list(string)
+  default = []
+}
+
+variable "acr_id" {
+  description = "Resource ID of an existing ACR to attach. Empty string skips the role assignment."
+  type        = string
+  default     = ""
+}
+
+variable "tags" {
+  type = map(string)
+  default = {
+    environment = "training"
+    managed-by  = "terraform"
+  }
+}
+EOF
+```
+
+```bash
+cat <<'EOF' > main.tf
+locals {
+  name_prefix = var.student_id
+  common_tags = merge(var.tags, { owner = var.student_id })
+}
+
+resource "random_string" "suffix" {
+  length  = 5
+  special = false
+  upper   = false
+}
+
+resource "azurerm_resource_group" "aks" {
+  name     = "rg-aks-${local.name_prefix}"
+  location = var.location
+  tags     = local.common_tags
+}
+
+# With Azure CNI Overlay the subnet only holds node IPs plus surge nodes,
+# so a /24 is generous even for a large cluster.
+resource "azurerm_virtual_network" "aks" {
+  name                = "vnet-aks-${local.name_prefix}"
+  location            = azurerm_resource_group.aks.location
+  resource_group_name = azurerm_resource_group.aks.name
+  address_space       = var.vnet_address_space
+  tags                = local.common_tags
+}
+
+resource "azurerm_subnet" "aks_nodes" {
+  name                 = "snet-aks-nodes"
+  resource_group_name  = azurerm_resource_group.aks.name
+  virtual_network_name = azurerm_virtual_network.aks.name
+  address_prefixes     = var.aks_subnet_prefix
+}
+
+resource "azurerm_log_analytics_workspace" "aks" {
+  name                = "law-aks-${local.name_prefix}-${random_string.suffix.result}"
+  location            = azurerm_resource_group.aks.location
+  resource_group_name = azurerm_resource_group.aks.name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+  tags                = local.common_tags
+}
+
+resource "azurerm_kubernetes_cluster" "this" {
+  name                = "aks-${local.name_prefix}"
+  location            = azurerm_resource_group.aks.location
+  resource_group_name = azurerm_resource_group.aks.name
+  dns_prefix          = "aks-${local.name_prefix}"
+  kubernetes_version  = var.kubernetes_version
+  sku_tier            = var.sku_tier
+  node_resource_group = "rg-aks-${local.name_prefix}-nodes"
+
+  automatic_upgrade_channel = "patch"
+  node_os_upgrade_channel   = "NodeImage"
+
+  oidc_issuer_enabled       = true
+  workload_identity_enabled = true
+
+  role_based_access_control_enabled = true
+
+  default_node_pool {
+    name                        = "system"
+    vm_size                     = var.system_node_vm_size
+    node_count                  = var.system_node_count
+    vnet_subnet_id              = azurerm_subnet.aks_nodes.id
+    zones                       = var.availability_zones
+    max_pods                    = var.max_pods_per_node
+    os_disk_size_gb             = 128
+    os_sku                      = "Ubuntu"
+    temporary_name_for_rotation = "systemtmp"
+
+    # Taints this pool CriticalAddonsOnly=true:NoSchedule so only
+    # tolerating add-ons (CoreDNS, metrics-server, CSI) land here.
+    only_critical_addons_enabled = true
+
+    node_labels = {
+      "nodepool-type" = "system"
+    }
+
+    upgrade_settings {
+      max_surge = "33%"
+    }
+  }
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  network_profile {
+    network_plugin      = "azure"
+    network_plugin_mode = "overlay"
+    network_policy      = "calico"
+    load_balancer_sku   = "standard"
+    pod_cidr            = var.pod_cidr
+    service_cidr        = var.service_cidr
+    dns_service_ip      = var.dns_service_ip
+  }
+
+  azure_active_directory_role_based_access_control {
+    tenant_id              = var.tenant_id
+    admin_group_object_ids = var.admin_group_object_ids
+    azure_rbac_enabled     = true
+  }
+
+  oms_agent {
+    log_analytics_workspace_id      = azurerm_log_analytics_workspace.aks.id
+    msi_auth_for_monitoring_enabled = true
+  }
+
+  auto_scaler_profile {
+    balance_similar_node_groups = true
+    scale_down_delay_after_add  = "10m"
+    scale_down_unneeded         = "10m"
+  }
+
+  tags = local.common_tags
+
+  lifecycle {
+    # The autoscaler owns the live node count; don't fight it on every plan.
+    ignore_changes = [default_node_pool[0].node_count]
+  }
+}
+
+resource "azurerm_kubernetes_cluster_node_pool" "user" {
+  name                  = "user"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.this.id
+  vm_size               = var.user_node_vm_size
+  mode                  = "User"
+  zones                 = var.availability_zones
+  vnet_subnet_id        = azurerm_subnet.aks_nodes.id
+  max_pods              = var.max_pods_per_node
+  os_disk_size_gb       = 128
+  os_type               = "Linux"
+  os_sku                = "Ubuntu"
+
+  auto_scaling_enabled = true
+  min_count            = var.user_node_min_count
+  max_count            = var.user_node_max_count
+
+  node_labels = {
+    "nodepool-type" = "user"
+    "workload"      = "applications"
+  }
+
+  upgrade_settings {
+    max_surge = "33%"
+  }
+
+  tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [node_count]
+  }
+}
+
+resource "azurerm_role_assignment" "acr_pull" {
+  count                            = var.acr_id == "" ? 0 : 1
+  scope                            = var.acr_id
+  role_definition_name             = "AcrPull"
+  principal_id                     = azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id
+  skip_service_principal_aad_check = true
+}
+EOF
+```
+
+```bash
+cat <<'EOF' > outputs.tf
+output "resource_group_name" {
+  value = azurerm_resource_group.aks.name
+}
+
+output "cluster_name" {
+  value = azurerm_kubernetes_cluster.this.name
+}
+
+output "cluster_fqdn" {
+  value = azurerm_kubernetes_cluster.this.fqdn
+}
+
+output "node_resource_group" {
+  description = "Azure-managed RG holding the VMSS, disks and load balancer. Never edit it by hand."
+  value       = azurerm_kubernetes_cluster.this.node_resource_group
+}
+
+output "oidc_issuer_url" {
+  value = azurerm_kubernetes_cluster.this.oidc_issuer_url
+}
+
+output "kubelet_identity_object_id" {
+  value = azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id
+}
+
+output "get_credentials_command" {
+  value = format(
+    "az aks get-credentials --resource-group %s --name %s --overwrite-existing && kubelogin convert-kubeconfig -l azurecli",
+    azurerm_resource_group.aks.name,
+    azurerm_kubernetes_cluster.this.name
+  )
+}
+
+output "kube_config_raw" {
+  value     = azurerm_kubernetes_cluster.this.kube_config_raw
+  sensitive = true
+}
+EOF
+```
+
+```bash
+cat <<EOF > terraform.tfvars
+subscription_id    = "$ARM_SUBSCRIPTION_ID"
+tenant_id          = "$TENANT_ID"
+student_id         = "$STUDENT"
+location           = "$LOCATION"
+kubernetes_version = "1.31"
+sku_tier           = "Free"
+acr_id             = ""
+EOF
+
+cat <<'EOF' > .gitignore
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+terraform.tfvars
+EOF
+```
+
+`terraform.tfvars` holds subscription and tenant IDs; `*.tfstate` holds the cluster's kubeconfig and certificates in cleartext. Both stay out of Git — in the real pipeline they become pipeline variables and a remote backend.
+
+```bash
+terraform init
+terraform fmt -recursive
+terraform validate
+terraform plan -out=tfplan
+terraform show -no-color tfplan | grep -E "^  # |Plan:"
+```
+
+Expect ~7 resources to create. **Read the plan out loud with the class** — in a regulated environment, this output attached to a change ticket is worth more than any screenshot.
+
+> If `validate` rejects an argument, you are on a different provider major version. AzureRM 4.x renamed several (`enable_auto_scaling` → `auto_scaling_enabled`, `automatic_channel_upgrade` → `automatic_upgrade_channel`). `terraform validate` names the offending argument — read the error rather than searching for a copy-paste fix. This is the job.
+
+```bash
+time terraform apply tfplan          # 6-10 min. Teach the 9.1 sizing material while it runs.
+terraform output
+export TF_RG="$(terraform output -raw resource_group_name)"
+export TF_AKS="$(terraform output -raw cluster_name)"
+az aks get-credentials -g "$TF_RG" -n "$TF_AKS" --overwrite-existing
+kubelogin convert-kubeconfig -l azurecli
+kubectl get nodes -L nodepool-type,topology.kubernetes.io/zone
+```
+
+**Prove the node pool design works:**
+
+```bash
+kubectl get nodes -l nodepool-type=system \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.taints[*].key}{"\n"}{end}'
+
+kubectl create namespace app-demo
+kubectl create deployment sched-test --image=nginx:1.27-alpine --replicas=4 -n app-demo
+kubectl rollout status deployment/sched-test -n app-demo --timeout=180s
+kubectl get pods -n app-demo -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName'
+kubectl get nodes -L nodepool-type
+```
+
+Every Pod is on `user`, zero on `system`. That output is the deliverable of this step.
+
+**Deploy the monolith onto your own cluster — the Section 9 deliverable:**
+
+```bash
+kubectl create namespace production
+kubectl apply -f ~/k8s-labs/09-foundations/04-config.yaml   -n production
+kubectl apply -f ~/k8s-labs/09-foundations/05-monolith.yaml -n production
+kubectl rollout status deployment/monolith -n production --timeout=300s
+kubectl get all -n production
+kubectl port-forward svc/monolith 8083:80 -n production & sleep 3
+curl -s -o /dev/null -w "monolith on my own AKS cluster -> HTTP %{http_code}\n" http://localhost:8083; kill %1
+```
+
+**Change through Terraform, not the Portal:**
+
+```bash
+sed -i 's/^acr_id             = ""/user_node_max_count = 5/' terraform.tfvars 2>/dev/null
+echo 'user_node_max_count = 5' >> terraform.tfvars
+terraform plan -out=tfplan2 | grep -E "max_count|Plan:"
+terraform apply tfplan2
+az aks nodepool show -g "$TF_RG" --cluster-name "$TF_AKS" -n user --query "{min:minCount,max:maxCount}" -o table
+```
+
+An in-place update. Contrast with changing `default_node_pool.name` or `network_profile.network_plugin`, which print `# forces replacement` — the one line you must never skim past.
+
+### WebUI equivalent
+
+Walk the **Create → Containers → AKS** wizard *after* Terraform finishes, so students map fields to HCL:
+
+| Terraform                                           | Portal field                                   |
+| --------------------------------------------------- | ---------------------------------------------- |
+| `default_node_pool.vm_size` / `node_count`          | **Basics → Node size / Node count**            |
+| `azurerm_kubernetes_cluster_node_pool.user`         | **Node pools → + Add node pool** (Mode = User) |
+| `only_critical_addons_enabled`                      | **Node pools → pool → Taints**                 |
+| `auto_scaling_enabled` / `min` / `max`              | **Node pools → Scale method: Autoscale**       |
+| `network_plugin_mode = "overlay"`                   | **Networking → Azure CNI Overlay**             |
+| `network_policy = "calico"`                         | **Networking → Network policy: Calico**        |
+| `oidc_issuer_enabled` / `workload_identity_enabled` | **Security → OIDC issuer / Workload Identity** |
+| `oms_agent`                                         | **Integrations → Container Insights**          |
+| `acr_id` role assignment                            | **Integrations → Container registry**          |
+
+Then two things to show in the Portal:
+
+1. **Resource groups → `rg-aks-student-01-nodes`** — the *node resource group*: VMSS, disks, load balancer, NSG. Azure owns it. **Never modify anything in it by hand**; AKS reconciles it and your change vanishes, or breaks the cluster.
+2. **The drift demo.** Change the `user` pool's max count to 9 in the Portal → Apply. Then run `terraform plan`. Terraform reports drift and proposes to revert. The Portal edit was faster and is now invisible to every reviewer, every audit and every colleague. **That demo is the strongest argument for GitOps you will make all day.**
+
+```bash
+terraform apply -auto-approve      # restores declared state
+```
+
+### Verify & troubleshoot
+
+```bash
+az aks show -g "$TF_RG" -n "$TF_AKS" \
+  --query "{name:name,version:currentKubernetesVersion,plugin:networkProfile.networkPlugin,mode:networkProfile.networkPluginMode,policy:networkProfile.networkPolicy,state:provisioningState}" -o table
+az aks nodepool list -g "$TF_RG" --cluster-name "$TF_AKS" -o table
+kubectl get pods -n kube-system -o wide | head
+```
+
+**Scenario — a Pod that targets the tainted system pool.**
+
+```bash
+kubectl run wrong-pool --image=nginx:1.27-alpine -n app-demo \
+  --overrides='{"spec":{"nodeSelector":{"nodepool-type":"system"},"containers":[{"name":"app","image":"nginx:1.27-alpine"}]}}'
+sleep 15
+kubectl describe pod wrong-pool -n app-demo | sed -n '/Events:/,$p'
+kubectl delete pod wrong-pool -n app-demo
+```
+
+Expected: `node(s) had untolerated taint {CriticalAddonsOnly: true}`. **The fix is not to remove the taint** — it is to schedule on the user pool, or, for a genuine add-on, add the toleration deliberately.
+
+| Symptom                                            | Cause                              | Fix                                                |
+| -------------------------------------------------- | ---------------------------------- | -------------------------------------------------- |
+| `subscription ID could not be determined`          | AzureRM 4.x needs it explicitly    | Set `subscription_id` or `ARM_SUBSCRIPTION_ID`     |
+| `Unsupported argument`                             | Provider major-version rename      | Read the error; check docs for the pinned version  |
+| `QuotaExceeded` / insufficient vCPU                | Subscription core quota            | Reduce node counts or request an increase          |
+| `ServiceCidrOverlapExistingSubnetsCidr`            | `service_cidr` overlaps the VNet   | VNet, pod CIDR and service CIDR must be disjoint   |
+| Apply hangs then fails                             | No capacity for that SKU in a zone | Try another SKU or drop `availability_zones`       |
+| `creating Role Assignment ... AuthorizationFailed` | No `roleAssignments/write`         | Attach ACR later with `az aks update --attach-acr` |
+| `destroy` fails on the RG                          | Objects created outside Terraform  | Delete LoadBalancer Services and PVCs first        |
+
+### Cleanup
+
+**Order matters more here than anywhere else in the course.** Kubernetes objects that created Azure resources go first.
+
+```bash
+kubectl delete svc -A --field-selector spec.type=LoadBalancer --ignore-not-found   # each owns a public IP
+kubectl delete namespace production app-demo --ignore-not-found                     # removes PVCs / disks
+kubectl get pv                                                                      # must be empty
+
+cd ~/k8s-labs/09-foundations/terraform
+terraform plan -destroy -out=tfdestroy
+terraform apply tfdestroy
+
+az group list --query "[?starts_with(name, 'rg-aks-${STUDENT}')].name" -o tsv       # must be empty
+kubectl config delete-context "aks-${STUDENT}" 2>/dev/null || true
+kubectl config use-context aks-training
+```
+
+If destroy fails partway, re-run `terraform apply tfdestroy` — it is idempotent. If it fails repeatedly on one resource, delete it in the Portal, `terraform state rm <address>`, destroy again.
+
+> **Instructor cost sweep, next morning:**
+> `for g in $(az group list --query "[?starts_with(name,'rg-aks-student-')].name" -o tsv); do az group delete -n "$g" --yes --no-wait; done`
+> Twenty student clusters left running for a week is a four-figure invoice.
+
+---
+
+## Lab 9.6 — Helm (40 min)
+
+### Objectives
+- Explain chart, release and values, and the precedence order between them.
+- Install, upgrade, roll back and uninstall a release in your namespace.
+- Render with `helm template` before installing, and use the checksum-annotation idiom so a config change rolls the Pods automatically.
+
+### Concept
+
+Helm is a template engine plus a release ledger. A **chart** is templated manifests + `values.yaml`. A **release** is one installation of a chart into one namespace under a name. **Values precedence**, lowest to highest: chart defaults → `-f values.yaml` (later files win) → `--set`. Each revision's rendered manifests are stored in a Secret named `sh.helm.release.v1.<release>.v<n>` — that ledger is what makes rollback possible.
+
+What Helm is **not**: a deployment controller. `helm upgrade` applies and waits; if someone edits the objects afterwards, Helm has no idea until the next upgrade. That gap is the argument for ArgoCD or Flux.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Engineer
+    participant H as helm
+    participant A as kube-apiserver
+    participant S as Release Secret
+    U->>H: helm install web ./chart -n student-01 -f values.yaml
+    H->>H: merge values, render templates
+    H->>A: create objects
+    H->>S: store revision 1
+    U->>H: helm upgrade --set replicaCount=2
+    H->>S: read revision 1
+    H->>A: 3-way merge patch, changed objects only
+    H->>S: store revision 2
+    U->>H: helm rollback web 1
+    H->>S: read revision 1 manifests
+    H->>A: apply revision 1 state
+    H->>S: store revision 3 (copy of 1) -- ledger is append-only
+```
+
+### Setup
+
+```bash
+cd ~/k8s-labs/09-foundations
+kubectl config use-context aks-training
+kubectl config set-context --current --namespace="$NAMESPACE"
+helm version
+```
+
+### CLI walkthrough
+
+```bash
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+helm search repo ingress-nginx --versions | head -5
+helm show values ingress-nginx/ingress-nginx | head -30
+```
+
+> **Chart sourcing, for the enterprise audience.** Public chart repositories change ownership, licensing and image locations — Bitnami's public catalog was restructured during 2025 and broke a large number of pinned references overnight. Mirror the charts and images you depend on into your own ACR, and pin chart versions and image digests. Never let a production rollout depend on an anonymous pull from a repository you do not control.
+
+**Render before you install — always:**
+
+```bash
+helm template demo ingress-nginx/ingress-nginx -n "$NAMESPACE" > preview.yaml
+grep -E "^kind:" preview.yaml | sort | uniq -c
+```
+
+`ClusterRole`, `ValidatingWebhookConfiguration`, `IngressClass` — all cluster-scoped, all things you cannot create as a namespace-scoped student. **`helm template` told you the install would fail before you tried it.** (The instructor has already installed this chart cluster-wide for Section 10.)
+
+**Scaffold your own chart — how every real chart in your organisation starts:**
+
+```bash
+helm create monolith-chart
+rm -f monolith-chart/templates/hpa.yaml monolith-chart/templates/ingress.yaml
+
+cat <<'EOF' > monolith-chart/values.yaml
+replicaCount: 2
+
+image:
+  repository: mcr.microsoft.com/azuredocs/aks-helloworld
+  pullPolicy: IfNotPresent
+  tag: "v1"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: "monolith-helm"
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+config:
+  appEnv: "dev"
+  logLevel: "info"
+  title: "Monolith deployed by Helm"
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+livenessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+autoscaling:
+  enabled: false
+
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+EOF
+
+cat <<'EOF' > monolith-chart/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "monolith-chart.fullname" . }}-config
+  labels:
+    {{- include "monolith-chart.labels" . | nindent 4 }}
+data:
+  APP_ENV: {{ .Values.config.appEnv | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  TITLE: {{ .Values.config.title | quote }}
+EOF
+```
+
+Wire the ConfigMap into the Deployment, with the checksum annotation — this is *the* Helm idiom:
+
+```bash
+python3 - <<'PYEOF'
+import pathlib
+p = pathlib.Path("monolith-chart/templates/deployment.yaml")
+s = p.read_text()
+
+anno = ('      annotations:\n'
+        '        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}\n')
+
+if "checksum/config" not in s:
+    if "      annotations:\n        {{- toYaml . | nindent 8 }}" in s:
+        s = s.replace("      annotations:\n",
+                      anno.replace("      annotations:\n", "      annotations:\n"), 1)
+        s = s.replace('      annotations:\n        {{- toYaml . | nindent 8 }}',
+                      anno + '        {{- toYaml . | nindent 8 }}', 1)
+    else:
+        s = s.replace("    spec:\n", anno + "    spec:\n", 1)
+
+s = s.replace(
+    "          resources:\n            {{- toYaml .Values.resources | nindent 12 }}",
+    '          envFrom:\n            - configMapRef:\n                name: {{ include "monolith-chart.fullname" . }}-config\n'
+    "          resources:\n            {{- toYaml .Values.resources | nindent 12 }}",
+    1,
+)
+p.write_text(s)
+PYEOF
+
+grep -n -B1 -A2 "checksum/config" monolith-chart/templates/deployment.yaml
+grep -n -A2 "envFrom" monolith-chart/templates/deployment.yaml
+```
+
+```bash
+helm lint ./monolith-chart
+helm template monolith-helm ./monolith-chart -n "$NAMESPACE" | grep -E "^kind:|checksum/config"
+
+helm install monolith-helm ./monolith-chart -n "$NAMESPACE" --wait --timeout 5m
+helm list -n "$NAMESPACE"
+helm status monolith-helm -n "$NAMESPACE" | head -8
+kubectl get secret -n "$NAMESPACE" -l "owner=helm"     # the release ledger, visible
+```
+
+**Upgrade with a values file, then with `--set`:**
+
+```bash
+cat <<'EOF' > values-dev.yaml
+replicaCount: 3
+config:
+  appEnv: "dev"
+  logLevel: "debug"
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 192Mi
+EOF
+
+helm upgrade monolith-helm ./monolith-chart -n "$NAMESPACE" -f values-dev.yaml --wait --timeout 5m
+helm upgrade monolith-helm ./monolith-chart -n "$NAMESPACE" -f values-dev.yaml --set replicaCount=1 --wait
+kubectl get deploy -n "$NAMESPACE" -l "app.kubernetes.io/instance=monolith-helm" \
+  -o custom-columns='NAME:.metadata.name,REPLICAS:.spec.replicas'
+helm history monolith-helm -n "$NAMESPACE"
+```
+
+`--set replicaCount=1` beat the file's `3`. Command line always wins.
+
+**The checksum idiom, proved:**
+
+```bash
+kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=monolith-helm" \
+  -o custom-columns='NAME:.metadata.name,AGE:.metadata.creationTimestamp'
+helm upgrade monolith-helm ./monolith-chart -n "$NAMESPACE" -f values-dev.yaml --set config.logLevel=warn --wait
+kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=monolith-helm" \
+  -o custom-columns='NAME:.metadata.name,AGE:.metadata.creationTimestamp'
+```
+
+New Pod names. A ConfigMap-only change produced a rolling restart automatically — no `rollout restart` needed. That is the whole reason charts beat a folder of static YAML.
+
+**Rollback and test:**
+
+```bash
+helm history monolith-helm -n "$NAMESPACE"
+helm rollback monolith-helm 2 -n "$NAMESPACE" --wait --timeout 5m
+helm history monolith-helm -n "$NAMESPACE"      # rollback is a NEW revision -- append-only ledger
+helm test monolith-helm -n "$NAMESPACE" --logs  # the generated test-connection Pod; most teams delete it, a mistake
+```
+
+**Diff plugin — install on day one of any real project:**
+
+```bash
+helm plugin install https://github.com/databus23/helm-diff 2>/dev/null || echo "already installed"
+helm diff upgrade monolith-helm ./monolith-chart -n "$NAMESPACE" -f values-dev.yaml --set replicaCount=4
+```
+
+Red/green field-level output before anything happens. In a change-controlled enterprise that output *is* your change record.
+
+**Package to ACR — the enterprise pattern (charts as OCI artifacts beside your images):**
+
+```bash
+helm package ./monolith-chart --destination ./dist
+# az acr login --name "$ACR_NAME"
+# helm push ./dist/monolith-chart-0.1.0.tgz "oci://${ACR_LOGIN_SERVER}/helm"
+# helm install monolith-helm "oci://${ACR_LOGIN_SERVER}/helm/monolith-chart" --version 0.1.0 -n "$NAMESPACE"
+```
+
+### WebUI equivalent
+
+Helm has no first-class Portal UI. **Workloads → Deployments →** open a release object → **YAML** → find `app.kubernetes.io/managed-by: Helm`. That label is the only clue in the UI. **Configuration → Secrets** shows `sh.helm.release.v1.monolith-helm.v1..v5` — one per revision.
+
+**Drift demo:** scale `monolith-helm` to 5 in the Portal, then `helm upgrade monolith-helm ./monolith-chart -n "$NAMESPACE" -f values-dev.yaml --wait`. It snaps back. Editing a Helm-managed object through the Portal is a drift event that the next upgrade silently reverts.
+
+### Verify & troubleshoot
+
+```bash
+helm list -n "$NAMESPACE"                                    # STATUS deployed
+helm history monolith-helm -n "$NAMESPACE"                   # >= 4 revisions
+kubectl get all -n "$NAMESPACE" -l "app.kubernetes.io/managed-by=Helm"
+```
+
+**Scenario — a failed upgrade, and `--atomic`.**
+
+```bash
+helm upgrade monolith-helm ./monolith-chart -n "$NAMESPACE" \
+  -f values-dev.yaml --set image.tag=not-a-real-tag --wait --timeout 90s
+helm list -n "$NAMESPACE"                                    # STATUS: failed
+kubectl describe pod -n "$NAMESPACE" -l "app.kubernetes.io/instance=monolith-helm" | sed -n '/Events:/,$p' | tail -10
+helm rollback monolith-helm -n "$NAMESPACE" --wait --timeout 5m
+
+# Better: let Helm roll itself back.
+helm upgrade monolith-helm ./monolith-chart -n "$NAMESPACE" \
+  -f values-dev.yaml --set image.tag=still-not-real --atomic --timeout 90s || echo "auto-rolled-back"
+helm list -n "$NAMESPACE"                                    # STATUS: deployed
+```
+
+`--wait --timeout` is what turns a silent half-broken rollout into a failed command your pipeline can detect. Always use it in CI; prefer `--atomic`.
+
+| Symptom                                        | Cause                                      | Fix                                        |
+| ---------------------------------------------- | ------------------------------------------ | ------------------------------------------ |
+| `cannot re-use a name that is still in use`    | Release exists                             | `helm upgrade`, or uninstall first         |
+| Stuck in `pending-upgrade`                     | Interrupted upgrade (Ctrl-C, CI timeout)   | `helm rollback <rel> <last-good>`          |
+| `field is immutable`                           | Changed a Deployment `selector`            | Uninstall and reinstall                    |
+| Objects exist, `helm list` empty               | Wrong namespace, or created with `kubectl` | `helm list -A`; check `managed-by`         |
+| `INSTALLATION FAILED: ... is forbidden`        | Chart creates cluster-scoped objects       | `helm template` first; instructor installs |
+| Rollback reverts config but Pods don't restart | No checksum annotation                     | Add it as above                            |
+| Values seem ignored                            | Precedence, or a typo in a nested key      | `helm get values <rel> -n <ns> --all`      |
+
+### Cleanup
+
+```bash
+helm uninstall monolith-helm -n "$NAMESPACE"
+helm list -n "$NAMESPACE" --all
+kubectl get all -n "$NAMESPACE" -l "app.kubernetes.io/managed-by=Helm"
+rm -rf ./dist preview.yaml
+kubectl get all -n "$NAMESPACE"                  # the hand-written monolith from 9.4 remains -- keep it
+```
+
+`helm uninstall` deletes the history Secrets too, so rollback is no longer possible. Use `--keep-history` when you want the release marked `uninstalled` but still rollback-able.
 
