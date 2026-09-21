@@ -390,7 +390,7 @@ spec:
             - name: POSTGRES_DB
               value: appdb
             - name: PGDATA
-              value: /var/lib/postgres/pgdata 
+              value: /var/lib/postgresql/pgdata 
           resources:
             requests:
               cpu: 100m
