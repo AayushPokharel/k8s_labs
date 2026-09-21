@@ -267,8 +267,8 @@ kubectl get nodes
 Install Velero.
 
 ```
-export VERSION="v1.14.0"
-wget https://github.com/${VERSION}/velero-${VERSION}-linux-amd64.tar.gz
+export VERSION="v1.18.2"
+wget https://github.com/velero-io/velero/releases/download/v1.18.2/velero-v1.18.2-linux-amd64.tar.gz
 tar -xvf velero-${VERSION}-linux-amd64.tar.gz
 mkdir -p ~/.local/bin
 mv velero-${VERSION}-linux-amd64/velero ~/.local/bin/
