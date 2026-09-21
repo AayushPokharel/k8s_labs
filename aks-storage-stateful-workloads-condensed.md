@@ -390,7 +390,7 @@ spec:
             - name: POSTGRES_DB
               value: appdb
             - name: PGDATA
-              value: /var/lib/postgres/data/pgdata 
+              value: /var/lib/postgres/pgdata 
           resources:
             requests:
               cpu: 100m
@@ -405,7 +405,7 @@ spec:
             periodSeconds: 5
           volumeMounts:
             - name: pgdata
-              mountPath: /var/lib/postgresql/data
+              mountPath: /var/lib/postgresql
   volumeClaimTemplates:
     - metadata:
         name: pgdata
