@@ -405,7 +405,7 @@ spec:
             periodSeconds: 5
           volumeMounts:
             - name: pgdata
-              mountPath: /var/lib/postgresql/data/pgdata
+              mountPath: /var/lib/postgresql/data
   volumeClaimTemplates:
     - metadata:
         name: pgdata
