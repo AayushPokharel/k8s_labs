@@ -599,8 +599,8 @@ spec:
           ls -l "$AZURE_FEDERATED_TOKEN_FILE";
           echo "Logging into Microsoft Entra ID with the projected federation token...";
           az login --service-principal \
-            --username "$AZURE_CLIENT_ID" \
-            --tenant "$AZURE_TENANT_ID" \
+            --username "${AZURE_CLIENT_ID}" \
+            --tenant "${AZURE_TENANT_ID}" \
             --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" \
             --output none;
           echo "Reading Blob container metadata with the federated identity...";
