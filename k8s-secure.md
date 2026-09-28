@@ -572,14 +572,13 @@ kubectl get serviceaccount azure-storage-reader --namespace "$LAB_NAMESPACE" --o
 
 The Pod label `azure.workload.identity/use: "true"` is required for the Workload Identity mutating webhook to inject the projected token and environment variables. [Microsoft Learn — Microsoft Entra Workload ID](https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview).
 
-### Manifest — `manifests/workload-identity/azure-cli-pod.yaml`
+### Manifest — `manifests/workload-identity/azure-cli-pod-alt.yaml`
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
   name: workload-identity-demo
-  namespace: ${LAB_NAMESPACE}
   labels:
     app: workload-identity-demo
     azure.workload.identity/use: "true"
@@ -599,13 +598,13 @@ spec:
           ls -l "$AZURE_FEDERATED_TOKEN_FILE";
           echo "Logging into Microsoft Entra ID with the projected federation token...";
           az login --service-principal \
-            --username "${AZURE_CLIENT_ID}" \
-            --tenant "${AZURE_TENANT_ID}" \
-            --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" \
+            --username "$AZURE_CLIENT_ID" \
+            --tenant "$AZURE_TENANT_ID" \
+            --federated-token "$(cat $AZURE_FEDERATED_TOKEN_FILE)" \
             --output none;
           echo "Reading Blob container metadata with the federated identity...";
           az storage container list \
-            --account-name "${LAB2_STORAGE_ACCOUNT}" \
+            --account-name "secure89d4fdd2" \
             --auth-mode login \
             --query '[].{name:name}' \
             --output table
@@ -615,7 +614,7 @@ Apply the Pod manifest.
 
 ```bash
 # Start the test Pod that authenticates using the projected federation token.
-envsubst < manifests/workload-identity/azure-cli-pod.yaml | kubectl apply -f -
+kubectl apply -n ${LAB_NAMESPACE} azure-cli-pod-alt.yaml
 ```
 
 Wait for completion.
