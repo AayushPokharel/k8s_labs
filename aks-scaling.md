@@ -34,9 +34,9 @@ The source template `manifests/templates/qos-demo.yaml.tmpl` creates three Pods 
 Identify the QoS class for each Pod and relate it to the resource specification.
 
 ```bash
-wget https://
-unzip
-
+wget https://github.com/AayushPokharel/k8s_labs/raw/refs/heads/main/files.zip
+unzip files.zip
+cd files
 ```
 
 ```bash
